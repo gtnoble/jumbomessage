@@ -32,8 +32,8 @@ unittest {
     scope(exit) free(memory);
     
     auto state = cast(SharedState*)memory;
-    state.writeSizeT(42, 0);
-    auto value = state.readSizeT(0);
+    state.writeSizeT(42);
+    auto value = state.readSizeT();
     assert(value == 42, "Expected 42 but got " ~ value.to!string);
 }
 
@@ -44,8 +44,8 @@ unittest {
     
     auto state = cast(SharedState*)memory;
     ubyte[] testData = [1, 2, 3, 4, 5];
-    state.writeData(testData, 0);
-    auto result = state.readData(0, testData.length);
+    state.writeData(testData);
+    auto result = state.readData(testData.length);
     assert(result == testData, "Data mismatch");
 }
 
@@ -56,10 +56,9 @@ unittest {
     
     auto state = cast(SharedState*)memory;
     ubyte[] testData = [1, 2, 3, 4, 5];
-    size_t nextPos = state.writeBuffer(testData, 0);
-    auto result = state.readBuffer(0);
+    state.writeBuffer(testData);
+    auto result = state.readBuffer();
     assert(result == testData, "Buffer data mismatch");
-    assert(nextPos == size_t.sizeof + testData.length, "Incorrect next position");
 }
 
 unittest {
@@ -72,13 +71,13 @@ unittest {
     ubyte[] data2 = [4, 5, 6];
     
     // Write first buffer
-    size_t pos = state.writeBuffer(data1, 0);
-    auto result1 = state.readBuffer(0);
+    state.writeBuffer(data1);
+    auto result1 = state.readBuffer();
     assert(result1 == data1, "First buffer data mismatch");
     
     // Write second buffer that should wrap around
-    pos = state.writeBuffer(data2, pos);
-    auto result2 = state.readBuffer(size_t.sizeof + data1.length);
+    state.writeBuffer(data2);
+    auto result2 = state.readBuffer();
     assert(result2 == data2, "Second buffer data mismatch");
 }
 
@@ -91,7 +90,7 @@ unittest {
     assert(state.getAvailableSpace() == 1024, "Initial available space incorrect");
     
     ubyte[] testData = [1, 2, 3, 4, 5];
-    state.writePos = state.writeBuffer(testData, 0);
+    state.writeBuffer(testData);
     assert(state.getUsedSpace() == size_t.sizeof + testData.length, 
            "Used space calculation incorrect");
     assert(state.getAvailableSpace() == 1024 - (size_t.sizeof + testData.length),
@@ -507,7 +506,7 @@ unittest {
     // Thread that will send after delay
     void sender() {
         Thread.sleep(100.msecs);
-        q.send("test".to!(ubyte[]));
+        q.send(cast(ubyte[])"test");
     }
 
     auto t1 = new Thread(&receiver);
@@ -545,7 +544,7 @@ unittest {
     // Thread that will send after delay
     void senderThread() {
         Thread.sleep(100.msecs);
-        sender.send("test".to!(ubyte[]));
+        sender.send(cast(ubyte[])"test");
     }
 
     auto t1 = new Thread(&receiverThread);

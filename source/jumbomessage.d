@@ -31,81 +31,65 @@ struct SharedState {
         return SharedState.sizeof + ubyte.sizeof * bufferSize;
     }
 
-    void writeSizeT(size_t value, size_t position) {
-        position = position % bufferSize;
-        // Use writeData to handle potential wraparound
+    void writeSizeT(size_t value) {
         ubyte[size_t.sizeof] bytes = (cast(ubyte*)&value)[0..size_t.sizeof];
-        writeData(bytes, position);
+        writeData(bytes);
     }
 
-    size_t readSizeT(size_t position) {
-        position = position % bufferSize;
-        // Use readData to handle potential wraparound
-        ubyte[] bytes = readData(position, size_t.sizeof);
+    size_t readSizeT() {
+        ubyte[] bytes = readData(size_t.sizeof);
         return *(cast(size_t*)bytes.ptr);
     }
 
-    void writeData(const ubyte[] data, size_t position) {
-        enforce(data.length <= bufferSize, "Data too large for buffer");
-        position = position % bufferSize;
+    void writeData(const ubyte[] data) {
+        assert(data.length <= bufferSize, "Data too large for buffer");
+        size_t position = writePos % bufferSize;
         
         ubyte* buffer = getBuffer();
         for (size_t i = 0; i < data.length; i++) {
             buffer[(position + i) % bufferSize] = data[i];
         }
+        writePos += data.length;
     }
 
-    ubyte[] readData(size_t position, size_t length) {
-        enforce(length <= bufferSize, "Data length exceeds buffer size");
-        position = position % bufferSize;
+    ubyte[] readData(size_t length) {
+        assert(length <= bufferSize, "Data length exceeds buffer size");
+        size_t position = readPos % bufferSize;
         
         ubyte[] result = new ubyte[length];
         ubyte* buffer = getBuffer();
         for (size_t i = 0; i < length; i++) {
             result[i] = buffer[(position + i) % bufferSize];
         }
+        readPos += length;
         return result;
     }
 
-    size_t writeBuffer(const ubyte[] buffer, size_t position) {
+    void writeBuffer(const ubyte[] buffer) {
         // First ensure we have enough total space available
-        enforce(size_t.sizeof + buffer.length <= bufferSize, "Buffer too large for queue");
+        assert(size_t.sizeof + buffer.length <= bufferSize, "Buffer too large for queue");
+        assert(buffer.length <= getAvailableSpace(), "Not enough space to write buffer");
         
         // Write the length
-        writeSizeT(buffer.length, position % bufferSize);
+        writeSizeT(buffer.length);
         
-        // Write the data after the length, allowing wraparound
-        size_t dataStart = (position + size_t.sizeof) % totalSize;
-        writeData(buffer, dataStart);
-        
-        // Return the next write position
-        return (dataStart + buffer.length) % bufferSize;
+        writeData(buffer);
     }
     
-    void writeNext(const ubyte[] buffer) {
-        writePos = writeBuffer(buffer, writePos);
+    ubyte[] readBuffer() {
+        size_t length = readSizeT();
+        assert(length <= bufferSize, "Invalid buffer length");
+        assert(length <= getUsedSpace(), "Not enough data to read");
+        return readData(length);
     }
     
-    ubyte[] readBuffer(size_t position) {
-        size_t length = readSizeT(position);
-        enforce(length <= bufferSize, "Invalid buffer length");
-        size_t dataStart = (position + size_t.sizeof) % bufferSize;
-        return readData(dataStart, length);
-    }
-    
-    ubyte[] readNext() {
-        ubyte[] result = readBuffer(readPos);
-        readPos = (readPos + size_t.sizeof + result.length) % bufferSize;
-        return result;
+    size_t getUsedSpace() const {
+        assert(writePos >= readPos, "Write position must be greater than or equal to read position");
+        return writePos - readPos;
     }
 
-    size_t getUsedSpace() {
-        return writePos >= readPos ? 
-            writePos - readPos :
-            totalSize - (readPos - writePos);
-    }
-
-    size_t getAvailableSpace() {
+    size_t getAvailableSpace() const {
+        assert(bufferSize >= getUsedSpace(), "Buffer size must be greater than or equal to used space");
         return bufferSize - getUsedSpace();
     }
 }
@@ -133,45 +117,78 @@ class JumboMessageQueue {
         return _name;
     }
 
+    int mutexValue() {
+        return getSemValue(mutex);
+    }
+
+    int spaceAvailableValue() {
+        return getSemValue(spaceAvailable);
+    }
+
+    int dataAvailableValue() {
+        return getSemValue(dataAvailable);
+    }
+
     void send(const ubyte[] data) {
-        enforce(data.length + size_t.sizeof < state.bufferSize, "Message too large");
-
+        size_t spaceNeeded = data.length + size_t.sizeof;
+        enforce(spaceNeeded < state.bufferSize, "Message too large");
+        
+        // Now check if we have enough space under mutex
         sem_wait(mutex);
-        scope(exit) sem_post(mutex);
-
-        while (data.length + size_t.sizeof > state.getAvailableSpace()) {
-            // Release mutex and wait for space to become available
+        
+        while (state.getAvailableSpace() < spaceNeeded) {
+            // Not enough space yet, release mutex and wait for more space
             sem_post(mutex);
-            sem_wait(spaceAvailable);  // Wait for signal that some space was freed
+            sem_wait(spaceAvailable);  // Wait for next space notification
             sem_wait(mutex);
         }
-
-        state.writeNext(data);
+        
+        state.writeBuffer(data);
+        
+        sem_post(mutex);
         sem_post(dataAvailable);
     }
 
     ubyte[] receive() {
         sem_wait(dataAvailable);
         sem_wait(mutex);
-        scope(exit) sem_post(mutex);
-
-        ubyte[] result = state.readNext();
         
+        ubyte[] result = state.readBuffer();
+        
+        // Check if there's still data available
+        bool hasMoreData = state.getUsedSpace() > 0;
+        
+        // Always signal that space is available after a read
         sem_post(spaceAvailable);
+        
+        // If there's more data, keep dataAvailable signaled
+        if (hasMoreData) {
+            sem_post(dataAvailable);
+        }
+        
+        sem_post(mutex);
         return result;
     }
 
     void clear() {
         sem_wait(mutex);
         scope(exit) sem_post(mutex);
-
+        
         // Reset state
         state.readPos = 0;
         state.writePos = 0;
-
+        
         // Reset semaphores
-        while (sem_trywait(dataAvailable) == 0) {} // Drain dataAvailable
-        while (sem_trywait(spaceAvailable) == 0) {} // Drain spaceAvailable
+        int value;
+        
+        // Drain dataAvailable to 0
+        while (sem_getvalue(dataAvailable, &value) == 0 && value > 0) {
+            sem_wait(dataAvailable);
+        }
+        
+        while (sem_getvalue(spaceAvailable, &value) == 0 && value > 0) {
+            sem_wait(spaceAvailable);
+        }
     }
 
     private void initResources() {
@@ -203,7 +220,7 @@ class JumboMessageQueue {
         mutex = sem_open(toStringz("/" ~ _name ~ "_mutex"), O_CREAT, octal!"600", 1);
         enforce(mutex != SEM_FAILED, "Failed to create mutex semaphore");
         
-        spaceAvailable = sem_open(toStringz("/" ~ _name ~ "_space"), O_CREAT, octal!"600", 0);
+        spaceAvailable = sem_open(toStringz("/" ~ _name ~ "_space"), O_CREAT, octal!"600", 1);  // Binary semaphore, initially 1 since buffer is empty
         enforce(spaceAvailable != SEM_FAILED, "Failed to create spaceAvailable semaphore");
         
         dataAvailable = sem_open(toStringz("/" ~ _name ~ "_data"), O_CREAT, octal!"600", 0);
@@ -212,6 +229,12 @@ class JumboMessageQueue {
         if (isNew) {
             clear();
         }
+    }
+
+    private int getSemValue(sem_t* sem) {
+        int value;
+        sem_getvalue(sem, &value);
+        return value;
     }
 
     private void cleanup() {
