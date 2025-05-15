@@ -1,0 +1,30 @@
+{
+    "name": "jumbomessage",
+    "description": "shared memory message queue for D",
+    "authors": ["Your Name"],
+    "license": "MIT",
+    "targetType": "library",
+    "sourceFiles": ["source/jumbomessage.d"],
+    
+    "configurations": [
+        {
+            "name": "producer",
+            "targetType": "executable",
+            "sourceFiles": ["examples/producer.d"],
+            "mainSourceFile": "examples/producer.d"
+        },
+        {
+            "name": "consumer",
+            "targetType": "executable",
+            "sourceFiles": ["examples/consumer.d"],
+            "mainSourceFile": "examples/consumer.d"
+        },
+        {
+            "name": "unittest",
+            "targetType": "executable",
+            "sourcePaths": ["source", "tests"],
+            "excludeSourcePaths": [],
+            "mainSourceFile": "tests/jumbomessage_test.d"
+        }
+    ]
+}

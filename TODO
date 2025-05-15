@@ -1,0 +1,1 @@
+I think the test failures are due to the fact that D chars are larger than 1 byte
