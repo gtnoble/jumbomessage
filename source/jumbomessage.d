@@ -54,6 +54,8 @@ struct SharedState {
 
     ubyte[] readData(size_t length) {
         assert(length <= bufferSize, "Data length exceeds buffer size");
+        assert(readPos + length <= writePos, "Not enough data to read");
+
         size_t position = readPos % bufferSize;
         
         ubyte[] result = new ubyte[length];
@@ -98,8 +100,7 @@ class JumboMessageQueue {
     private string _name;
     private int shmFd;
     private SharedState* state;
-    private sem_t* readMutex;
-    private sem_t* writeMutex;
+    private sem_t* queueMutex;  // Single mutex for all queue operations
     private sem_t* spaceAvailable;
     private sem_t* dataAvailable;
     private size_t shmSize = 1024 * 1024; // 1MB default
@@ -118,14 +119,6 @@ class JumboMessageQueue {
         return _name;
     }
 
-    int readMutexValue() {
-        return getSemValue(readMutex);
-    }
-
-    int writeMutexValue() {
-        return getSemValue(writeMutex);
-    }
-
     int spaceAvailableValue() {
         return getSemValue(spaceAvailable);
     }
@@ -136,53 +129,49 @@ class JumboMessageQueue {
 
     void send(const ubyte[] data) {
         size_t spaceNeeded = data.length + size_t.sizeof;
-        enforce(spaceNeeded < state.bufferSize, "Message too large");
         
-        // Now check if we have enough space under writeMutex
-        sem_wait(writeMutex);
-        
-        while (state.getAvailableSpace() < spaceNeeded) {
-            // Not enough space yet, release mutex and wait for more space
-            sem_post(writeMutex);
-            sem_wait(spaceAvailable);  // Wait for next space notification
-            sem_wait(writeMutex);
+        // Check space under queue mutex
+        sem_wait(queueMutex);
+        {
+            scope(exit) sem_post(queueMutex);
+            assert(getSemValue(queueMutex) == 0, "queueMutex should be 0 after waiting");
+
+            enforce(spaceNeeded < state.bufferSize, "Message too large");
+            
+            while (state.getAvailableSpace() < spaceNeeded) {
+                // Not enough space yet, release mutex and wait for more space
+                sem_post(queueMutex);
+                sem_wait(spaceAvailable);  // Wait for next space notification
+                sem_wait(queueMutex);
+            }
+            
+            state.writeBuffer(data);
+            
+            sem_post(dataAvailable);
         }
-        
-        state.writeBuffer(data);
-        
-        sem_post(writeMutex);
-        sem_post(dataAvailable);
     }
 
     ubyte[] receive() {
         sem_wait(dataAvailable);
-        sem_wait(readMutex);
-        
-        ubyte[] result = state.readBuffer();
-        
-        // Check if there's still data available
-        bool hasMoreData = state.getUsedSpace() > 0;
-        
-        // Always signal that space is available after a read
-        sem_post(spaceAvailable);
-        
-        // If there's more data, keep dataAvailable signaled
-        if (hasMoreData) {
-            sem_post(dataAvailable);
+
+        sem_wait(queueMutex);
+        {
+            scope(exit) sem_post(queueMutex);
+            assert(getSemValue(queueMutex) == 0, "queueMutex should be 0 after waiting");
+            
+            ubyte[] result = state.readBuffer();
+            
+            // Always signal that space is available after a read
+            sem_post(spaceAvailable);
+            
+            return result;
         }
-        
-        sem_post(readMutex);
-        return result;
     }
 
     void clear() {
-        // Acquire both locks in a consistent order to prevent deadlocks
-        sem_wait(writeMutex);
-        sem_wait(readMutex);
-        scope(exit) {
-            sem_post(readMutex);
-            sem_post(writeMutex);
-        }
+        // Acquire queue mutex
+        sem_wait(queueMutex);
+        scope(exit) sem_post(queueMutex);
         
         // Reset state
         state.readPos = 0;
@@ -227,11 +216,8 @@ class JumboMessageQueue {
         }
 
         // Initialize semaphores
-        readMutex = sem_open(toStringz("/" ~ _name ~ "_readmutex"), O_CREAT, octal!"600", 1);
-        enforce(readMutex != SEM_FAILED, "Failed to create read mutex semaphore");
-        
-        writeMutex = sem_open(toStringz("/" ~ _name ~ "_writemutex"), O_CREAT, octal!"600", 1);
-        enforce(writeMutex != SEM_FAILED, "Failed to create write mutex semaphore");
+        queueMutex = sem_open(toStringz("/" ~ _name ~ "_mutex"), O_CREAT, octal!"600", 1);
+        enforce(queueMutex != SEM_FAILED, "Failed to create queue mutex semaphore");
         
         spaceAvailable = sem_open(toStringz("/" ~ _name ~ "_space"), O_CREAT, octal!"600", 1);  // Binary semaphore, initially 1 since buffer is empty
         enforce(spaceAvailable != SEM_FAILED, "Failed to create spaceAvailable semaphore");
@@ -249,20 +235,24 @@ class JumboMessageQueue {
         sem_getvalue(sem, &value);
         return value;
     }
-
+    
+    private bool isBinarySemaphore(sem_t* sem) {
+        int value;
+        sem_getvalue(sem, &value);
+        return value == 1 || value == 0;
+    }
+    
     private void cleanup() {
         if (state != null) munmap(state, state.totalSize);
         if (shmFd != -1) close(shmFd);
-        if (readMutex != null) sem_close(readMutex);
-        if (writeMutex != null) sem_close(writeMutex);
+        if (queueMutex != null) sem_close(queueMutex);
         if (spaceAvailable != null) sem_close(spaceAvailable);
         if (dataAvailable != null) sem_close(dataAvailable);
     }
 
     static void cleanup(string queueName) {
         shm_unlink(toStringz("/" ~ queueName));
-        sem_unlink(toStringz("/" ~ queueName ~ "_readmutex"));
-        sem_unlink(toStringz("/" ~ queueName ~ "_writemutex"));
+        sem_unlink(toStringz("/" ~ queueName ~ "_mutex"));
         sem_unlink(toStringz("/" ~ queueName ~ "_space"));
         sem_unlink(toStringz("/" ~ queueName ~ "_data"));
     }

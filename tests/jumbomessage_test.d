@@ -521,6 +521,157 @@ unittest {
            "Message content mismatch - Expected: 'test', Actual: '" ~ cast(string)receivedData ~ "'");
 }
 
+//@("Multiple consumers")
+unittest {
+    writeln("Starting test: Multiple consumers");
+    
+    // Set up queue
+    auto q = new JumboMessageQueue("/test_multi_consumers", 1024 * 1024);
+    scope(exit) {
+        q.destroy();
+        JumboMessageQueue.cleanup("/test_multi_consumers");
+    }
+
+    // Track received messages
+    shared int[string] receivedMessages;
+    shared int totalReceived;
+    import core.sync.mutex;
+    import core.atomic;
+    auto mutex = new shared Mutex();
+
+    // Consumer thread function
+    void consumer(int id) {
+        for(;;) {
+            try {
+                auto msg = q.receive();
+                string message = cast(string)msg;
+                
+                // Track message receipt under mutex protection
+                synchronized(mutex) {
+                    if(message in receivedMessages) {
+                        assert(false, "Message received multiple times: " ~ message);
+                    }
+                    receivedMessages[message] = id;
+                    atomicOp!"+="(totalReceived, 1);
+                }
+            } catch(Exception) {
+                break;
+            }
+        }
+    }
+
+    // Create and start consumer threads
+    Thread[] consumers;
+    foreach(id; 0..3) {  // Create 3 consumer threads
+        consumers ~= new Thread(() => consumer(id));
+        consumers[$-1].start();
+    }
+
+    // Send test messages
+    foreach(i; 0..100) {
+        q.send(cast(ubyte[])(i.to!string));
+        // Small delay to ensure message ordering consistency
+        Thread.sleep(1.msecs);
+    }
+
+    // Allow time for consumers to process messages
+    Thread.sleep(100.msecs);
+
+    // Stop consumers by destroying queue
+    q.destroy();
+
+    // Wait for all consumers to finish
+    foreach(c; consumers) {
+        c.join();
+    }
+
+    // Verify results
+    assert(totalReceived == 100, 
+           "Expected 100 messages to be received, but got " ~ totalReceived.to!string);
+    foreach(i; 0..100) {
+        auto msg = i.to!string;
+        assert(msg in receivedMessages, 
+               "Message " ~ msg ~ " was not received by any consumer");
+    }
+}
+
+//@("Multiple consumers with separate queues")
+unittest {
+    writeln("Starting test: Multiple consumers with separate queues");
+    
+    // Set up queues
+    auto sender = new JumboMessageQueue("/test_multi_consumers_separate", 1024 * 1024);
+    auto receiver = new JumboMessageQueue("/test_multi_consumers_separate", 1024 * 1024);
+    scope(exit) {
+        sender.destroy();
+        receiver.destroy();
+        JumboMessageQueue.cleanup("/test_multi_consumers_separate");
+    }
+
+    // Track received messages
+    shared int[string] receivedMessages;
+    shared int totalReceived;
+    import core.sync.mutex;
+    import core.atomic;
+    auto mutex = new shared Mutex();
+
+    // Consumer thread function
+    void consumer(int id) {
+        for(;;) {
+            try {
+                auto msg = receiver.receive();
+                string message = cast(string)msg;
+                
+                // Track message receipt under mutex protection
+                synchronized(mutex) {
+                    if(message in receivedMessages) {
+                        assert(false, "Message received multiple times: " ~ message);
+                    }
+                    receivedMessages[message] = id;
+                    atomicOp!"+="(totalReceived, 1);
+                }
+            } catch(Exception) {
+                break;
+            }
+        }
+    }
+
+    // Create and start consumer threads
+    Thread[] consumers;
+    foreach(id; 0..3) {  // Create 3 consumer threads
+        consumers ~= new Thread(() => consumer(id));
+        consumers[$-1].start();
+    }
+
+    // Send test messages
+    foreach(i; 0..100) {
+        sender.send(cast(ubyte[])(i.to!string));
+        // Small delay to ensure message ordering consistency
+        Thread.sleep(1.msecs);
+    }
+
+    // Allow time for consumers to process messages
+    Thread.sleep(100.msecs);
+
+    // Stop consumers by destroying queue
+    sender.destroy();
+    receiver.destroy();
+
+    // Wait for all consumers to finish
+    foreach(c; consumers) {
+        c.join();
+    }
+
+    // Verify results
+    assert(totalReceived == 100,
+           "Expected 100 messages to be received, but got " ~ totalReceived.to!string);
+    foreach(i; 0..100) {
+        auto msg = i.to!string;
+        assert(msg in receivedMessages,
+               "Message " ~ msg ~ " was not received by any consumer");
+    }
+}
+
 //@("Empty queue blocks with separate queues")
 unittest {
     writeln("Starting test: Empty queue blocks with separate queues");
