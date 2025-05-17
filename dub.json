@@ -1,7 +1,7 @@
 {
     "name": "jumbomessage",
     "description": "shared memory message queue for D",
-    "authors": ["Your Name"],
+    "authors": ["Garret Noble"],
     "license": "MIT",
     "targetType": "library",
     "sourceFiles": ["source/jumbomessage.d"],
