@@ -172,4 +172,4 @@ The system includes various safety checks:
 
 ## License
 
-[Add your chosen license here]
+MIT
